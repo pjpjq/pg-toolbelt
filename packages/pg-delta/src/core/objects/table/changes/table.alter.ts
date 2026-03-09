@@ -592,12 +592,18 @@ export class AlterTableDropColumn extends AlterTableChange {
 export class AlterTableAlterColumnType extends AlterTableChange {
   public readonly table: Table;
   public readonly column: ColumnProps;
+  public readonly previousColumn?: ColumnProps;
   public readonly scope = "object" as const;
 
-  constructor(props: { table: Table; column: ColumnProps }) {
+  constructor(props: {
+    table: Table;
+    column: ColumnProps;
+    previousColumn?: ColumnProps;
+  }) {
     super();
     this.table = props.table;
     this.column = props.column;
+    this.previousColumn = props.previousColumn;
   }
 
   get requires() {
@@ -607,6 +613,10 @@ export class AlterTableAlterColumnType extends AlterTableChange {
   }
 
   serialize(_options?: SerializeOptions): string {
+    const hasTypeChanged =
+      this.previousColumn?.data_type_str !== undefined &&
+      this.previousColumn.data_type_str !== this.column.data_type_str;
+
     const parts: string[] = [
       "ALTER TABLE",
       `${this.table.schema}.${this.table.name}`,
@@ -617,6 +627,9 @@ export class AlterTableAlterColumnType extends AlterTableChange {
     ];
     if (this.column.collation) {
       parts.push("COLLATE", this.column.collation);
+    }
+    if (hasTypeChanged) {
+      parts.push("USING", `${this.column.name}::${this.column.data_type_str}`);
     }
     return parts.join(" ");
   }

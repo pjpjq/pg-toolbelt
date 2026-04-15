@@ -151,6 +151,12 @@ export class AlterPublicationDropTables extends AlterPublicationChange {
     return Array.from(dependencies);
   }
 
+  get drops() {
+    // Treat ALTER PUBLICATION ... DROP TABLE as a destructive change so it runs
+    // in the drop phase before DROP TABLE removes the referenced relation.
+    return this.tables.map((table) => stableId.table(table.schema, table.name));
+  }
+
   serialize(_options?: SerializeOptions): string {
     const targets = this.tables.map((table) => `${table.schema}.${table.name}`);
     return `ALTER PUBLICATION ${this.publication.name} DROP TABLE ${targets.join(", ")}`;

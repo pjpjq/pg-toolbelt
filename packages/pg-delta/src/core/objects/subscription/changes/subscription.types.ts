@@ -9,6 +9,7 @@ import type {
 import type { CommentSubscription } from "./subscription.comment.ts";
 import type { CreateSubscription } from "./subscription.create.ts";
 import type { DropSubscription } from "./subscription.drop.ts";
+import type { SecurityLabelSubscription } from "./subscription.security-label.ts";
 
 export type SubscriptionChange =
   | CreateSubscription
@@ -19,4 +20,5 @@ export type SubscriptionChange =
   | AlterSubscriptionDisable
   | AlterSubscriptionSetOptions
   | AlterSubscriptionSetOwner
-  | CommentSubscription;
+  | CommentSubscription
+  | SecurityLabelSubscription;

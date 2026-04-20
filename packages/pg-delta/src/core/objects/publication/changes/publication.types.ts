@@ -10,6 +10,7 @@ import type {
 import type { CommentPublication } from "./publication.comment.ts";
 import type { CreatePublication } from "./publication.create.ts";
 import type { DropPublication } from "./publication.drop.ts";
+import type { SecurityLabelPublication } from "./publication.security-label.ts";
 
 export type PublicationChange =
   | AlterPublicationAddSchemas
@@ -21,4 +22,5 @@ export type PublicationChange =
   | AlterPublicationSetOwner
   | CommentPublication
   | CreatePublication
-  | DropPublication;
+  | DropPublication
+  | SecurityLabelPublication;

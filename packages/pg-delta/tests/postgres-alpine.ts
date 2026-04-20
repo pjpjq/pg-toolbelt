@@ -1,11 +1,48 @@
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   AbstractStartedContainer,
   GenericContainer,
   type StartedTestContainer,
   Wait,
 } from "testcontainers";
+import type { PostgresVersion } from "./constants.ts";
 
 const POSTGRES_PORT = 5432;
+
+/**
+ * Maps a PostgreSQL major version to the Alpine base tag that ships the
+ * matching `postgresql<PG_MAJOR>-dev` package. Needed because a given
+ * alpine release typically only carries the current pg-dev headers.
+ */
+const ALPINE_TAG_FOR_PG_MAJOR: Record<PostgresVersion, string> = {
+  15: "3.19",
+  17: "3.23",
+};
+
+const TESTS_DIR = dirname(fileURLToPath(import.meta.url));
+const DUMMY_SECLABEL_IMAGE_PREFIX = "pg-delta-test";
+
+/**
+ * Build (or reuse) a Postgres image that has the `dummy_seclabel` test
+ * contrib module pre-installed, so integration tests can exercise
+ * `SECURITY LABEL` end-to-end. Tagged locally as `pg-delta-test:<major>`
+ * and cached by the Docker daemon between runs.
+ */
+export async function buildPostgresTestImage(
+  version: PostgresVersion,
+): Promise<string> {
+  const imageTag = `${DUMMY_SECLABEL_IMAGE_PREFIX}:${version}`;
+  await GenericContainer.fromDockerfile(TESTS_DIR, "dummy-seclabel.Dockerfile")
+    .withBuildArgs({
+      PG_MAJOR: String(version),
+      PG_BRANCH: `REL_${version}_STABLE`,
+      ALPINE_TAG: ALPINE_TAG_FOR_PG_MAJOR[version],
+    })
+    .withCache(true)
+    .build(imageTag, { deleteOnExit: false });
+  return imageTag;
+}
 
 export class PostgresAlpineContainer extends GenericContainer {
   private database = "postgres";
@@ -27,8 +64,16 @@ export class PostgresAlpineContainer extends GenericContainer {
     this.withTmpFs({
       "/var/lib/postgresql/data": "rw,noexec,nosuid,size=256m",
     });
-    // Enable logical replication to be able to create subscriptions
-    this.withCommand(["postgres", "-c", "wal_level=logical"]);
+    // Enable logical replication to be able to create subscriptions, and
+    // preload `dummy_seclabel` so the "dummy" SECURITY LABEL provider is
+    // registered in every session (see dummy-seclabel.Dockerfile).
+    this.withCommand([
+      "postgres",
+      "-c",
+      "wal_level=logical",
+      "-c",
+      "shared_preload_libraries=dummy_seclabel",
+    ]);
   }
 
   public override async start(): Promise<StartedPostgresAlpineContainer> {

@@ -6,6 +6,7 @@ import {
   type PrivilegeProps,
   privilegePropsSchema,
 } from "../base.privilege-diff.ts";
+import { securityLabelPropsSchema } from "../security-label.types.ts";
 
 const FunctionKindSchema = z.enum([
   "f", // function
@@ -64,10 +65,11 @@ const procedurePropsSchema = z.object({
   owner: z.string(),
   comment: z.string().nullable(),
   privileges: z.array(privilegePropsSchema),
+  security_labels: z.array(securityLabelPropsSchema).default([]),
 });
 
 type ProcedurePrivilegeProps = PrivilegeProps;
-export type ProcedureProps = z.infer<typeof procedurePropsSchema>;
+export type ProcedureProps = z.input<typeof procedurePropsSchema>;
 
 export class Procedure extends BasePgModel {
   public readonly schema: ProcedureProps["schema"];
@@ -99,6 +101,9 @@ export class Procedure extends BasePgModel {
   public readonly owner: ProcedureProps["owner"];
   public readonly comment: ProcedureProps["comment"];
   public readonly privileges: ProcedurePrivilegeProps[];
+  public readonly security_labels: z.infer<
+    typeof procedurePropsSchema
+  >["security_labels"];
 
   constructor(props: ProcedureProps) {
     super();
@@ -135,6 +140,7 @@ export class Procedure extends BasePgModel {
     this.owner = props.owner;
     this.comment = props.comment;
     this.privileges = props.privileges;
+    this.security_labels = props.security_labels ?? [];
   }
 
   get stableId(): `procedure:${string}` {
@@ -179,6 +185,7 @@ export class Procedure extends BasePgModel {
       owner: this.owner,
       comment: this.comment,
       privileges: this.privileges,
+      security_labels: this.security_labels,
     };
   }
 }
@@ -244,7 +251,20 @@ select
       )
       from lateral aclexplode(COALESCE(p.proacl, acldefault('f', p.proowner))) as x(grantor, grantee, privilege_type, is_grantable)
     ), '[]'
-  ) as privileges
+  ) as privileges,
+  coalesce(
+    (
+      select json_agg(
+        json_build_object('provider', sl.provider, 'label', sl.label)
+        order by sl.provider
+      )
+      from pg_catalog.pg_seclabel sl
+      where sl.objoid = p.oid
+        and sl.classoid = 'pg_proc'::regclass
+        and sl.objsubid = 0
+    ),
+    '[]'::json
+  ) as security_labels
 from
   pg_catalog.pg_proc p
   inner join pg_catalog.pg_language l on l.oid = p.prolang

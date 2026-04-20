@@ -1111,6 +1111,7 @@ const schema = new Schema({
   owner: "admin",
   comment: "application schema",
   privileges: [],
+  security_labels: [],
 });
 
 const extension = new Extension({

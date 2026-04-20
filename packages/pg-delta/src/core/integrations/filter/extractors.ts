@@ -61,7 +61,12 @@ export const PROPERTY_EXTRACTORS: Record<string, PropertyExtractor> = {
     return null;
   },
   provider: (change: Change) => {
-    if (change.scope === "security_label" && "securityLabel" in change) {
+    const scoped = change as { scope: string };
+    if (
+      scoped.scope === "security_label" &&
+      "securityLabel" in change &&
+      change.securityLabel != null
+    ) {
       return (change as { securityLabel: { provider: string } }).securityLabel
         .provider;
     }

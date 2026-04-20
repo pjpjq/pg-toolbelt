@@ -28,12 +28,13 @@ describe("securityLabelPropsSchema", () => {
 });
 
 describe("diffSecurityLabels", () => {
-  const makeCreate = (p: SecurityLabelProps) => ({
-    kind: "create" as const,
+  type Change = { kind: "create" | "drop" } & SecurityLabelProps;
+  const makeCreate = (p: SecurityLabelProps): Change => ({
+    kind: "create",
     ...p,
   });
-  const makeDrop = (p: SecurityLabelProps) => ({
-    kind: "drop" as const,
+  const makeDrop = (p: SecurityLabelProps): Change => ({
+    kind: "drop",
     ...p,
   });
 

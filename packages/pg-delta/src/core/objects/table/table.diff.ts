@@ -704,7 +704,8 @@ export function diffTables(
       const columnTypeChanged =
         mainCol.data_type_str !== branchCol.data_type_str;
       const columnCollationChanged = mainCol.collation !== branchCol.collation;
-      const needsDefaultSafeFlow = columnTypeChanged && mainCol.default !== null;
+      const needsDefaultSafeFlow =
+        columnTypeChanged && mainCol.default !== null;
 
       // TYPE or COLLATION change
       if (columnTypeChanged || columnCollationChanged) {

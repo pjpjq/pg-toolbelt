@@ -11,7 +11,9 @@ test("repro command targets the pg-delta package test script", () => {
   expect(command).toContain("bun run --filter '@supabase/pg-delta' test");
   expect(command).toContain("PGDELTA_SUPABASE_PROJECT=dbdev");
   expect(command).toContain("PGDELTA_SUPABASE_SMOKE_STEP_FROM=2");
-  expect(command).toContain("tests/integration/supabase-project-progressive.test.ts");
+  expect(command).toContain(
+    "tests/integration/supabase-project-progressive.test.ts",
+  );
 });
 
 test("step config rejects invalid or empty smoke ranges", () => {

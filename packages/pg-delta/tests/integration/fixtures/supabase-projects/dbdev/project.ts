@@ -17,6 +17,12 @@ export default defineSupabaseProjectFixture({
       onApplyError: "fail",
     },
     progressive: {
+      // The runner compares stepping main against a *fully* migrated branch. With
+      // the full history, the plan is a "catch up" to head that cannot be
+      // applied as one plan (statements like ADD COLUMN without migration-time
+      // DEFAULT/backfill from later files). Scope to the same prefix as
+      // declarative so the target branch and incremental main can converge.
+      include: (filename) => filename.startsWith("20220117"),
       onApplyError: "skip",
     },
     adjacent: {

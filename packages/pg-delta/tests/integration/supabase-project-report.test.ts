@@ -29,15 +29,15 @@ test("writes markdown and companion artifacts for smoke failures", async () => {
 
   expect(result.reportPath).toContain("report.md");
   expect(await Bun.file(result.reportPath).exists()).toBe(true);
-  expect(await Bun.file(path.join(result.directory, "metadata.json")).exists()).toBe(
-    true,
-  );
+  expect(
+    await Bun.file(path.join(result.directory, "metadata.json")).exists(),
+  ).toBe(true);
   expect(await Bun.file(path.join(result.directory, "plan.sql")).exists()).toBe(
     true,
   );
-  expect(await Bun.file(path.join(result.directory, "remaining.sql")).exists()).toBe(
-    true,
-  );
+  expect(
+    await Bun.file(path.join(result.directory, "remaining.sql")).exists(),
+  ).toBe(true);
 
   const report = await readFile(result.reportPath, "utf-8");
   expect(report).toContain("## Summary");

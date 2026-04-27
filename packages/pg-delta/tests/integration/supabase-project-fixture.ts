@@ -65,7 +65,11 @@ export async function discoverSupabaseProjectFixtures(): Promise<
   for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
     if (!entry.isDirectory()) continue;
 
-    const projectFile = path.join(SUPABASE_PROJECTS_DIR, entry.name, "project.ts");
+    const projectFile = path.join(
+      SUPABASE_PROJECTS_DIR,
+      entry.name,
+      "project.ts",
+    );
     if (!(await Bun.file(projectFile).exists())) {
       continue;
     }

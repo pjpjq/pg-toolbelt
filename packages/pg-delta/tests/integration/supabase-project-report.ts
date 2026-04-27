@@ -1,6 +1,10 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+function jsonStringifySupabaseCatalog(value: unknown): string {
+  return `${JSON.stringify(value, (_key, v) => (typeof v === "bigint" ? v.toString() : v), 2)}\n`;
+}
+
 export type SupabaseSmokeScenarioName =
   | "declarative"
   | "progressive"
@@ -42,13 +46,17 @@ function sanitizeSegment(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
-function createArtifactId(input: WriteSupabaseSmokeFailureArtifactsInput): string {
+function createArtifactId(
+  input: WriteSupabaseSmokeFailureArtifactsInput,
+): string {
   if (input.artifactId) {
     return sanitizeSegment(input.artifactId);
   }
 
   const stepLabel =
-    input.step !== undefined ? `step-${String(input.step).padStart(4, "0")}` : "step-na";
+    input.step !== undefined
+      ? `step-${String(input.step).padStart(4, "0")}`
+      : "step-na";
   const migrationLabel = input.migrationName
     ? sanitizeSegment(input.migrationName.replace(/\.sql$/i, ""))
     : "migration-na";
@@ -80,9 +88,13 @@ function buildMarkdown(
     "```",
     "",
     input.skippedMigrations && input.skippedMigrations.length > 0
-      ? ["## Skipped Migrations", "```text", ...input.skippedMigrations, "```", ""].join(
-          "\n",
-        )
+      ? [
+          "## Skipped Migrations",
+          "```text",
+          ...input.skippedMigrations,
+          "```",
+          "",
+        ].join("\n")
       : "",
     input.planSql
       ? ["## Plan SQL", "```sql", input.planSql, "```", ""].join("\n")
@@ -147,7 +159,11 @@ export async function writeSupabaseSmokeFailureArtifacts(
       "utf-8",
     ),
     input.planSql
-      ? writeFile(path.join(directory, "plan.sql"), `${input.planSql}\n`, "utf-8")
+      ? writeFile(
+          path.join(directory, "plan.sql"),
+          `${input.planSql}\n`,
+          "utf-8",
+        )
       : Promise.resolve(),
     input.remainingSql
       ? writeFile(
@@ -159,14 +175,14 @@ export async function writeSupabaseSmokeFailureArtifacts(
     input.sourceCatalog
       ? writeFile(
           path.join(directory, "source-catalog.json"),
-          `${JSON.stringify(input.sourceCatalog, null, 2)}\n`,
+          jsonStringifySupabaseCatalog(input.sourceCatalog),
           "utf-8",
         )
       : Promise.resolve(),
     input.targetCatalog
       ? writeFile(
           path.join(directory, "target-catalog.json"),
-          `${JSON.stringify(input.targetCatalog, null, 2)}\n`,
+          jsonStringifySupabaseCatalog(input.targetCatalog),
           "utf-8",
         )
       : Promise.resolve(),

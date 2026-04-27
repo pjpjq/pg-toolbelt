@@ -5,16 +5,13 @@ import { runSupabaseProjectProgressiveSmoke } from "./supabase-project-runners.t
 const fixtures = await discoverSupabaseProjectFixtures();
 
 for (const fixture of fixtures) {
-  describe(
-    `${fixture.displayName} progressive smoke (pg${fixture.supabasePostgresVersion})`,
-    () => {
-      test(
-        "each migration prefix plans and applies cleanly against the fully migrated target",
-        async () => {
-          await runSupabaseProjectProgressiveSmoke(fixture);
-        },
-        30 * 60 * 1000,
-      );
-    },
-  );
+  describe(`${fixture.displayName} progressive smoke (pg${fixture.supabasePostgresVersion})`, () => {
+    test(
+      "each migration prefix plans and applies cleanly against the fully migrated target",
+      async () => {
+        await runSupabaseProjectProgressiveSmoke(fixture);
+      },
+      30 * 60 * 1000,
+    );
+  });
 }

@@ -8,16 +8,18 @@ import { compileSerializeDSL } from "../../src/core/integrations/serialize/dsl.t
 import { createPlan } from "../../src/core/plan/create.ts";
 import { createPool, endPool } from "../../src/core/postgres-config.ts";
 import { sortChanges } from "../../src/core/sort/sort-changes.ts";
-import { POSTGRES_VERSION_TO_SUPABASE_POSTGRES_TAG } from "../constants.ts";
-import { SupabasePostgreSqlContainer } from "../supabase-postgres.js";
+import {
+  runWithSupabaseIsolatedBaseInit,
+  suppressShutdownError,
+} from "../utils.ts";
 import {
   loadSupabaseProjectMigrations,
   type SupabaseProjectFixture,
   type SupabaseProjectMigration,
 } from "./supabase-project-fixture.ts";
 import {
-  writeSupabaseSmokeFailureArtifacts,
   type SupabaseSmokeScenarioName,
+  writeSupabaseSmokeFailureArtifacts,
 } from "./supabase-project-report.ts";
 
 type ProjectPools = {
@@ -48,11 +50,6 @@ type SmokeStepResult = {
   targetCatalog?: unknown;
 };
 
-function suppressShutdownError(err: Error & { code?: string }) {
-  if (err.code === "57P01" || err.code === "53100") return;
-  console.error("Pool error:", err);
-}
-
 function createProjectPool(
   fixture: SupabaseProjectFixture,
   connectionUri: string,
@@ -71,23 +68,30 @@ async function withSupabaseProjectPools<T>(
   fixture: SupabaseProjectFixture,
   fn: (pools: ProjectPools) => Promise<T>,
 ): Promise<T> {
-  const image = `supabase/postgres:${POSTGRES_VERSION_TO_SUPABASE_POSTGRES_TAG[fixture.supabasePostgresVersion]}`;
-  const [containerMain, containerBranch] = await Promise.all([
-    new SupabasePostgreSqlContainer(image).start(),
-    new SupabasePostgreSqlContainer(image).start(),
-  ]);
-  const mainPool = createProjectPool(fixture, containerMain.getConnectionUri());
-  const branchPool = createProjectPool(
-    fixture,
-    containerBranch.getConnectionUri(),
-  );
+  return runWithSupabaseIsolatedBaseInit(
+    fixture.supabasePostgresVersion,
+    async (ctx) => {
+      if (!fixture.setRole) {
+        return await fn({
+          mainPool: ctx.main,
+          branchPool: ctx.branch,
+          image: ctx.image,
+        });
+      }
 
-  try {
-    return await fn({ mainPool, branchPool, image });
-  } finally {
-    await Promise.all([endPool(mainPool), endPool(branchPool)]);
-    await Promise.all([containerMain.stop(), containerBranch.stop()]);
-  }
+      const mainPool = createProjectPool(fixture, ctx.mainUri);
+      const branchPool = createProjectPool(fixture, ctx.branchUri);
+      try {
+        return await fn({
+          mainPool,
+          branchPool,
+          image: ctx.image,
+        });
+      } finally {
+        await Promise.all([endPool(mainPool), endPool(branchPool)]);
+      }
+    },
+  );
 }
 
 async function applyProjectMigrations(
@@ -143,13 +147,22 @@ function formatDeclarativeApplyFailure(
   applyResult: Awaited<ReturnType<typeof applyDeclarativeSchema>>,
 ): string {
   const stuckSql = applyResult.apply.stuckStatements
-    ?.map((statement) => `[${statement.code}] ${statement.message}\n  SQL: ${statement.statement.sql}`)
+    ?.map(
+      (statement) =>
+        `[${statement.code}] ${statement.message}\n  SQL: ${statement.statement.sql}`,
+    )
     .join("\n");
   const errorSql = applyResult.apply.errors
-    ?.map((statement) => `[${statement.code}] ${statement.message}\n  SQL: ${statement.statement.sql}`)
+    ?.map(
+      (statement) =>
+        `[${statement.code}] ${statement.message}\n  SQL: ${statement.statement.sql}`,
+    )
     .join("\n");
   const validationSql = applyResult.apply.validationErrors
-    ?.map((statement) => `[${statement.code}] ${statement.message}\n  SQL: ${statement.statement.sql}`)
+    ?.map(
+      (statement) =>
+        `[${statement.code}] ${statement.message}\n  SQL: ${statement.statement.sql}`,
+    )
     .join("\n");
 
   return stuckSql ?? errorSql ?? validationSql ?? "(no detail)";
@@ -163,7 +176,8 @@ export function resolveSupabaseSmokeStepConfig(
     skipApplyEnv?: string;
   } = {},
 ) {
-  const stepFromRaw = env.stepFromEnv ?? process.env.PGDELTA_SUPABASE_SMOKE_STEP_FROM;
+  const stepFromRaw =
+    env.stepFromEnv ?? process.env.PGDELTA_SUPABASE_SMOKE_STEP_FROM;
   const stepToRaw = env.stepToEnv ?? process.env.PGDELTA_SUPABASE_SMOKE_STEP_TO;
   const skipApplyRaw =
     env.skipApplyEnv ?? process.env.PGDELTA_SUPABASE_SMOKE_SKIP_APPLY;
@@ -209,8 +223,7 @@ function formatSmokeResultsSummary(
   skippedMigrations: string[],
 ): string {
   const failures = results.filter(
-    (result) =>
-      result.planStatus === "error" || result.applyStatus === "error",
+    (result) => result.planStatus === "error" || result.applyStatus === "error",
   );
 
   const lines = [
@@ -333,182 +346,41 @@ export async function runSupabaseProjectDeclarativeRoundtrip(
   fixture: SupabaseProjectFixture,
 ): Promise<void> {
   const scenario = fixture.scenarios.declarative;
-  const migrations = await loadSupabaseProjectMigrations(fixture, "declarative");
+  const migrations = await loadSupabaseProjectMigrations(
+    fixture,
+    "declarative",
+  );
 
-  await withSupabaseProjectPools(fixture, async ({ mainPool, branchPool, image }) => {
-    let skippedMigrations: string[] = [];
-    let planSql: string | undefined;
-    let remainingSql: string | undefined;
-    let sourceCatalog: unknown;
-    let targetCatalog: unknown;
-
-    try {
-      const applied = await applyProjectMigrations(
-        branchPool,
-        migrations,
-        scenario.onApplyError ?? "fail",
-      );
-      skippedMigrations = applied.skippedMigrations;
-
-      if (applied.appliedMigrations.length === 0) {
-        throw new Error(
-          `No migrations were applied for ${fixture.id} declarative scenario`,
-        );
-      }
-
-      const compiledFilter = fixture.integration.filter
-        ? compileFilterDSL(fixture.integration.filter)
-        : undefined;
-      const compiledSerialize = fixture.integration.serialize
-        ? compileSerializeDSL(fixture.integration.serialize)
-        : undefined;
-
-      const planResult = await createPlan(mainPool, branchPool, {
-        filter: fixture.integration.filter,
-        serialize: fixture.integration.serialize,
-        skipDefaultPrivilegeSubtraction:
-          fixture.skipDefaultPrivilegeSubtraction ?? false,
-      });
-
-      if (!planResult) {
-        throw new Error(
-          `createPlan returned null for ${fixture.id} declarative scenario using ${image}`,
-        );
-      }
-
-      const output = exportDeclarativeSchema(planResult, {
-        integration: compiledSerialize
-          ? { serialize: compiledSerialize }
-          : undefined,
-      });
-      planSql = output.files
-        .map((file) => `-- ${file.path}\n${file.sql}`)
-        .join("\n\n");
-
-      const applyResult = await applyDeclarativeSchema({
-        content: output.files.map((file) => ({ filePath: file.path, sql: file.sql })),
-        pool: mainPool,
-        disableCheckFunctionBodies: true,
-        validateFunctionBodies: fixture.validateFunctionBodies ?? false,
-      });
-
-      if (applyResult.apply.status !== "success") {
-        throw new Error(
-          [
-            `Declarative apply failed for ${fixture.id} (${applyResult.apply.status})`,
-            skippedMigrations.length > 0
-              ? `Skipped migrations:\n${skippedMigrations.join("\n")}`
-              : "",
-            formatDeclarativeApplyFailure(applyResult),
-          ]
-            .filter(Boolean)
-            .join("\n\n"),
-          { cause: applyResult },
-        );
-      }
-
-      const mainCatalog = await extractCatalog(mainPool);
-      const branchCatalog = await extractCatalog(branchPool);
-      sourceCatalog = mainCatalog;
-      targetCatalog = branchCatalog;
-      const allChanges = diffCatalogs(mainCatalog, branchCatalog);
-      const remainingChanges = compiledFilter
-        ? allChanges.filter(compiledFilter)
-        : allChanges;
-
-      if (remainingChanges.length > 0) {
-        const formatted = formatRemainingChanges(
-          mainCatalog,
-          branchCatalog,
-          remainingChanges,
-        );
-        remainingSql = formatted.remainingSql;
-
-        throw new Error(
-          [
-            `Declarative roundtrip left ${remainingChanges.length} change(s) for ${fixture.id}`,
-            `Image: ${image}`,
-            skippedMigrations.length > 0
-              ? `Skipped migrations:\n${skippedMigrations.join("\n")}`
-              : "",
-            `Remaining summary: ${JSON.stringify(formatted.remainingSummary, null, 2)}`,
-            `Remaining SQL:\n${formatted.remainingSql || "(no SQL generated)"}`,
-          ]
-            .filter(Boolean)
-            .join("\n\n"),
-        );
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      const artifacts = await writeScenarioFailureArtifacts({
-        fixture,
-        scenarioName: "declarative",
-        image,
-        errorMessage: message,
-        skippedMigrations,
-        planSql,
-        remainingSql,
-        sourceCatalog,
-        targetCatalog,
-      });
-
-      throw new Error(`${message}\n\nFailure artifacts: ${artifacts.reportPath}`, {
-        cause: err,
-      });
-    }
-  });
-}
-
-export async function runSupabaseProjectProgressiveSmoke(
-  fixture: SupabaseProjectFixture,
-): Promise<void> {
-  const scenario = fixture.scenarios.progressive;
-  const migrations = await loadSupabaseProjectMigrations(fixture, "progressive");
-
-  await withSupabaseProjectPools(fixture, async ({ mainPool, branchPool, image }) => {
-    const { appliedMigrations, skippedMigrations } = await applyProjectMigrations(
-      branchPool,
-      migrations,
-      scenario.onApplyError ?? "fail",
-    );
-    const { stepFrom, stepTo, skipApply } = resolveSupabaseSmokeStepConfig(
-      appliedMigrations.length,
-    );
-    const compiledFilter = fixture.integration.filter
-      ? compileFilterDSL(fixture.integration.filter)
-      : undefined;
-    const results: SmokeStepResult[] = [];
-
-    for (let step = 0; step <= stepTo; step += 1) {
-      const migrationName =
-        step === 0 ? "(empty)" : appliedMigrations[step - 1].filename;
-
-      if (step < stepFrom) {
-        if (step > 0) {
-          await mainPool.query(appliedMigrations[step - 1].sql);
-        }
-        continue;
-      }
-
-      const result: SmokeStepResult = {
-        step,
-        migrationApplied: migrationName,
-        planStatus: "success",
-      };
-
-      if (step > 0) {
-        try {
-          await mainPool.query(appliedMigrations[step - 1].sql);
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          result.planStatus = "error";
-          result.planError = `Migration apply failed on main: ${message}`;
-          results.push(result);
-          continue;
-        }
-      }
+  await withSupabaseProjectPools(
+    fixture,
+    async ({ mainPool, branchPool, image }) => {
+      let skippedMigrations: string[] = [];
+      let planSql: string | undefined;
+      let remainingSql: string | undefined;
+      let sourceCatalog: unknown;
+      let targetCatalog: unknown;
 
       try {
+        const applied = await applyProjectMigrations(
+          branchPool,
+          migrations,
+          scenario.onApplyError ?? "fail",
+        );
+        skippedMigrations = applied.skippedMigrations;
+
+        if (applied.appliedMigrations.length === 0) {
+          throw new Error(
+            `No migrations were applied for ${fixture.id} declarative scenario`,
+          );
+        }
+
+        const compiledFilter = fixture.integration.filter
+          ? compileFilterDSL(fixture.integration.filter)
+          : undefined;
+        const compiledSerialize = fixture.integration.serialize
+          ? compileSerializeDSL(fixture.integration.serialize)
+          : undefined;
+
         const planResult = await createPlan(mainPool, branchPool, {
           filter: fixture.integration.filter,
           serialize: fixture.integration.serialize,
@@ -517,109 +389,270 @@ export async function runSupabaseProjectProgressiveSmoke(
         });
 
         if (!planResult) {
-          result.planStatus = "no_changes";
-          result.changeCount = 0;
-          result.statementCount = 0;
-          result.applyStatus = "skipped";
-          results.push(result);
-          continue;
+          throw new Error(
+            `createPlan returned null for ${fixture.id} declarative scenario using ${image}`,
+          );
         }
 
-        result.changeCount = planResult.sortedChanges.length;
-        result.statementCount = planResult.plan.statements.length;
-        result.planSql = planResult.plan.statements.join(";\n\n");
+        const output = exportDeclarativeSchema(planResult, {
+          integration: compiledSerialize
+            ? { serialize: compiledSerialize }
+            : undefined,
+        });
+        planSql = output.files
+          .map((file) => `-- ${file.path}\n${file.sql}`)
+          .join("\n\n");
 
-        if (skipApply) {
-          result.applyStatus = "skipped";
-          results.push(result);
-          continue;
+        const applyResult = await applyDeclarativeSchema({
+          content: output.files.map((file) => ({
+            filePath: file.path,
+            sql: file.sql,
+          })),
+          pool: mainPool,
+          disableCheckFunctionBodies: true,
+          validateFunctionBodies: fixture.validateFunctionBodies ?? false,
+        });
+
+        if (applyResult.apply.status !== "success") {
+          throw new Error(
+            [
+              `Declarative apply failed for ${fixture.id} (${applyResult.apply.status})`,
+              skippedMigrations.length > 0
+                ? `Skipped migrations:\n${skippedMigrations.join("\n")}`
+                : "",
+              formatDeclarativeApplyFailure(applyResult),
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+            { cause: applyResult },
+          );
         }
 
-        let failedStatement: string | undefined;
+        const mainCatalog = await extractCatalog(mainPool);
+        const branchCatalog = await extractCatalog(branchPool);
+        sourceCatalog = mainCatalog;
+        targetCatalog = branchCatalog;
+        const allChanges = diffCatalogs(mainCatalog, branchCatalog);
+        const remainingChanges = compiledFilter
+          ? allChanges.filter(compiledFilter)
+          : allChanges;
 
-        try {
-          await mainPool.query("BEGIN");
-          await mainPool.query("SET LOCAL check_function_bodies = false");
+        if (remainingChanges.length > 0) {
+          const formatted = formatRemainingChanges(
+            mainCatalog,
+            branchCatalog,
+            remainingChanges,
+          );
+          remainingSql = formatted.remainingSql;
 
-          for (const statement of planResult.plan.statements) {
-            failedStatement = statement;
-            await mainPool.query(statement);
-          }
-
-          const mainCatalog = await extractCatalog(mainPool);
-          const branchCatalog = await extractCatalog(branchPool);
-          result.sourceCatalog = mainCatalog;
-          result.targetCatalog = branchCatalog;
-          const allChanges = diffCatalogs(mainCatalog, branchCatalog);
-          const remainingChanges = compiledFilter
-            ? allChanges.filter(compiledFilter)
-            : allChanges;
-
-          result.remainingChanges = remainingChanges.length;
-          result.applyStatus =
-            remainingChanges.length === 0 ? "success" : "error";
-
-          if (remainingChanges.length > 0) {
-            const { remainingSql } = formatRemainingChanges(
-              mainCatalog,
-              branchCatalog,
-              remainingChanges,
-            );
-            result.remainingSql = remainingSql;
-            result.applyError = remainingSql || "Remaining changes after apply";
-          }
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          result.applyStatus = "error";
-          result.applyError = message;
-          result.applyFailedStatement = failedStatement;
-        } finally {
-          try {
-            await mainPool.query("ROLLBACK");
-          } catch {
-            // Connection may have been interrupted; ignore rollback errors.
-          }
+          throw new Error(
+            [
+              `Declarative roundtrip left ${remainingChanges.length} change(s) for ${fixture.id}`,
+              `Image: ${image}`,
+              skippedMigrations.length > 0
+                ? `Skipped migrations:\n${skippedMigrations.join("\n")}`
+                : "",
+              `Remaining summary: ${JSON.stringify(formatted.remainingSummary, null, 2)}`,
+              `Remaining SQL:\n${formatted.remainingSql || "(no SQL generated)"}`,
+            ]
+              .filter(Boolean)
+              .join("\n\n"),
+          );
         }
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : String(err);
-        result.planStatus = "error";
-        result.planError = message;
+        const artifacts = await writeScenarioFailureArtifacts({
+          fixture,
+          scenarioName: "declarative",
+          image,
+          errorMessage: message,
+          skippedMigrations,
+          planSql,
+          remainingSql,
+          sourceCatalog,
+          targetCatalog,
+        });
+
+        throw new Error(
+          `${message}\n\nFailure artifacts: ${artifacts.reportPath}`,
+          {
+            cause: err,
+          },
+        );
+      }
+    },
+  );
+}
+
+export async function runSupabaseProjectProgressiveSmoke(
+  fixture: SupabaseProjectFixture,
+): Promise<void> {
+  const scenario = fixture.scenarios.progressive;
+  const migrations = await loadSupabaseProjectMigrations(
+    fixture,
+    "progressive",
+  );
+
+  await withSupabaseProjectPools(
+    fixture,
+    async ({ mainPool, branchPool, image }) => {
+      const { appliedMigrations, skippedMigrations } =
+        await applyProjectMigrations(
+          branchPool,
+          migrations,
+          scenario.onApplyError ?? "fail",
+        );
+      const { stepFrom, stepTo, skipApply } = resolveSupabaseSmokeStepConfig(
+        appliedMigrations.length,
+      );
+      const compiledFilter = fixture.integration.filter
+        ? compileFilterDSL(fixture.integration.filter)
+        : undefined;
+      const results: SmokeStepResult[] = [];
+
+      for (let step = 0; step <= stepTo; step += 1) {
+        const migrationName =
+          step === 0 ? "(empty)" : appliedMigrations[step - 1].filename;
+
+        if (step < stepFrom) {
+          if (step > 0) {
+            await mainPool.query(appliedMigrations[step - 1].sql);
+          }
+          continue;
+        }
+
+        const result: SmokeStepResult = {
+          step,
+          migrationApplied: migrationName,
+          planStatus: "success",
+        };
+
+        if (step > 0) {
+          try {
+            await mainPool.query(appliedMigrations[step - 1].sql);
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            result.planStatus = "error";
+            result.planError = `Migration apply failed on main: ${message}`;
+            results.push(result);
+            continue;
+          }
+        }
+
+        try {
+          const planResult = await createPlan(mainPool, branchPool, {
+            filter: fixture.integration.filter,
+            serialize: fixture.integration.serialize,
+            skipDefaultPrivilegeSubtraction:
+              fixture.skipDefaultPrivilegeSubtraction ?? false,
+          });
+
+          if (!planResult) {
+            result.planStatus = "no_changes";
+            result.changeCount = 0;
+            result.statementCount = 0;
+            result.applyStatus = "skipped";
+            results.push(result);
+            continue;
+          }
+
+          result.changeCount = planResult.sortedChanges.length;
+          result.statementCount = planResult.plan.statements.length;
+          result.planSql = planResult.plan.statements.join(";\n\n");
+
+          if (skipApply) {
+            result.applyStatus = "skipped";
+            results.push(result);
+            continue;
+          }
+
+          let failedStatement: string | undefined;
+
+          try {
+            await mainPool.query("BEGIN");
+            await mainPool.query("SET LOCAL check_function_bodies = false");
+
+            for (const statement of planResult.plan.statements) {
+              failedStatement = statement;
+              await mainPool.query(statement);
+            }
+
+            const mainCatalog = await extractCatalog(mainPool);
+            const branchCatalog = await extractCatalog(branchPool);
+            result.sourceCatalog = mainCatalog;
+            result.targetCatalog = branchCatalog;
+            const allChanges = diffCatalogs(mainCatalog, branchCatalog);
+            const remainingChanges = compiledFilter
+              ? allChanges.filter(compiledFilter)
+              : allChanges;
+
+            result.remainingChanges = remainingChanges.length;
+            result.applyStatus =
+              remainingChanges.length === 0 ? "success" : "error";
+
+            if (remainingChanges.length > 0) {
+              const { remainingSql } = formatRemainingChanges(
+                mainCatalog,
+                branchCatalog,
+                remainingChanges,
+              );
+              result.remainingSql = remainingSql;
+              result.applyError =
+                remainingSql || "Remaining changes after apply";
+            }
+          } catch (err: unknown) {
+            const message = err instanceof Error ? err.message : String(err);
+            result.applyStatus = "error";
+            result.applyError = message;
+            result.applyFailedStatement = failedStatement;
+          } finally {
+            try {
+              await mainPool.query("ROLLBACK");
+            } catch {
+              // Connection may have been interrupted; ignore rollback errors.
+            }
+          }
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          result.planStatus = "error";
+          result.planError = message;
+        }
+
+        results.push(result);
       }
 
-      results.push(result);
-    }
-
-    const failures = results.filter(
-      (result) =>
-        result.planStatus === "error" || result.applyStatus === "error",
-    );
-    if (failures.length > 0) {
-      const summary = formatSmokeResultsSummary(
-        fixture,
-        "progressive",
-        image,
-        results,
-        skippedMigrations,
+      const failures = results.filter(
+        (result) =>
+          result.planStatus === "error" || result.applyStatus === "error",
       );
-      const firstFailure = failures[0];
-      const artifacts = await writeScenarioFailureArtifacts({
-        fixture,
-        scenarioName: "progressive",
-        image,
-        errorMessage: summary,
-        step: firstFailure.step,
-        migrationName: firstFailure.migrationApplied,
-        skippedMigrations,
-        planSql: firstFailure.planSql,
-        remainingSql: firstFailure.remainingSql,
-        sourceCatalog: firstFailure.sourceCatalog,
-        targetCatalog: firstFailure.targetCatalog,
-      });
-      throw new Error(
-        `${summary}\n\nFailure artifacts: ${artifacts.reportPath}`,
-      );
-    }
-  });
+      if (failures.length > 0) {
+        const summary = formatSmokeResultsSummary(
+          fixture,
+          "progressive",
+          image,
+          results,
+          skippedMigrations,
+        );
+        const firstFailure = failures[0];
+        const artifacts = await writeScenarioFailureArtifacts({
+          fixture,
+          scenarioName: "progressive",
+          image,
+          errorMessage: summary,
+          step: firstFailure.step,
+          migrationName: firstFailure.migrationApplied,
+          skippedMigrations,
+          planSql: firstFailure.planSql,
+          remainingSql: firstFailure.remainingSql,
+          sourceCatalog: firstFailure.sourceCatalog,
+          targetCatalog: firstFailure.targetCatalog,
+        });
+        throw new Error(
+          `${summary}\n\nFailure artifacts: ${artifacts.reportPath}`,
+        );
+      }
+    },
+  );
 }
 
 export async function runSupabaseProjectAdjacentSmoke(
@@ -630,162 +663,171 @@ export async function runSupabaseProjectAdjacentSmoke(
   const applicable = await withSupabaseProjectPools(
     fixture,
     async ({ branchPool }) =>
-      applyProjectMigrations(branchPool, migrations, scenario.onApplyError ?? "fail"),
+      applyProjectMigrations(
+        branchPool,
+        migrations,
+        scenario.onApplyError ?? "fail",
+      ),
   );
 
   if (applicable.appliedMigrations.length === 0) {
-    throw new Error(`No migrations were applied for ${fixture.id} adjacent scenario`);
+    throw new Error(
+      `No migrations were applied for ${fixture.id} adjacent scenario`,
+    );
   }
 
-  await withSupabaseProjectPools(fixture, async ({ mainPool, branchPool, image }) => {
-    const maxStep = Math.max(applicable.appliedMigrations.length - 1, 0);
-    const { stepFrom, stepTo, skipApply } = resolveSupabaseSmokeStepConfig(
-      maxStep,
-    );
-    const compiledFilter = fixture.integration.filter
-      ? compileFilterDSL(fixture.integration.filter)
-      : undefined;
-    const results: SmokeStepResult[] = [];
+  await withSupabaseProjectPools(
+    fixture,
+    async ({ mainPool, branchPool, image }) => {
+      const maxStep = Math.max(applicable.appliedMigrations.length - 1, 0);
+      const { stepFrom, stepTo, skipApply } =
+        resolveSupabaseSmokeStepConfig(maxStep);
+      const compiledFilter = fixture.integration.filter
+        ? compileFilterDSL(fixture.integration.filter)
+        : undefined;
+      const results: SmokeStepResult[] = [];
 
-    for (
-      let step = 0;
-      step < applicable.appliedMigrations.length && step <= stepTo;
-      step += 1
-    ) {
-      const migration = applicable.appliedMigrations[step];
+      for (
+        let step = 0;
+        step < applicable.appliedMigrations.length && step <= stepTo;
+        step += 1
+      ) {
+        const migration = applicable.appliedMigrations[step];
 
-      await branchPool.query(migration.sql).catch((err) => {
-        throw new Error(
-          `Migration ${migration.filename} failed on branch during adjacent smoke: ${err.message}`,
-          { cause: err },
-        );
-      });
-
-      if (step < stepFrom) {
-        await mainPool.query(migration.sql);
-        continue;
-      }
-
-      const result: SmokeStepResult = {
-        step,
-        migrationApplied: migration.filename,
-        planStatus: "success",
-      };
-
-      try {
-        const planResult = await createPlan(mainPool, branchPool, {
-          filter: fixture.integration.filter,
-          serialize: fixture.integration.serialize,
-          skipDefaultPrivilegeSubtraction:
-            fixture.skipDefaultPrivilegeSubtraction ?? false,
+        await branchPool.query(migration.sql).catch((err) => {
+          throw new Error(
+            `Migration ${migration.filename} failed on branch during adjacent smoke: ${err.message}`,
+            { cause: err },
+          );
         });
 
-        if (!planResult) {
-          result.planStatus = "no_changes";
-          result.changeCount = 0;
-          result.statementCount = 0;
-          result.applyStatus = "skipped";
-        } else {
-          result.changeCount = planResult.sortedChanges.length;
-          result.statementCount = planResult.plan.statements.length;
-          result.planSql = planResult.plan.statements.join(";\n\n");
+        if (step < stepFrom) {
+          await mainPool.query(migration.sql);
+          continue;
+        }
 
-          if (skipApply) {
+        const result: SmokeStepResult = {
+          step,
+          migrationApplied: migration.filename,
+          planStatus: "success",
+        };
+
+        try {
+          const planResult = await createPlan(mainPool, branchPool, {
+            filter: fixture.integration.filter,
+            serialize: fixture.integration.serialize,
+            skipDefaultPrivilegeSubtraction:
+              fixture.skipDefaultPrivilegeSubtraction ?? false,
+          });
+
+          if (!planResult) {
+            result.planStatus = "no_changes";
+            result.changeCount = 0;
+            result.statementCount = 0;
             result.applyStatus = "skipped";
           } else {
-            let failedStatement: string | undefined;
+            result.changeCount = planResult.sortedChanges.length;
+            result.statementCount = planResult.plan.statements.length;
+            result.planSql = planResult.plan.statements.join(";\n\n");
 
-            try {
-              await mainPool.query("BEGIN");
-              await mainPool.query("SET LOCAL check_function_bodies = false");
+            if (skipApply) {
+              result.applyStatus = "skipped";
+            } else {
+              let failedStatement: string | undefined;
 
-              for (const statement of planResult.plan.statements) {
-                failedStatement = statement;
-                await mainPool.query(statement);
-              }
-
-              const mainCatalog = await extractCatalog(mainPool);
-              const branchCatalog = await extractCatalog(branchPool);
-              result.sourceCatalog = mainCatalog;
-              result.targetCatalog = branchCatalog;
-              const allChanges = diffCatalogs(mainCatalog, branchCatalog);
-              const remainingChanges = compiledFilter
-                ? allChanges.filter(compiledFilter)
-                : allChanges;
-
-              result.remainingChanges = remainingChanges.length;
-              result.applyStatus =
-                remainingChanges.length === 0 ? "success" : "error";
-
-              if (remainingChanges.length > 0) {
-                const { remainingSql } = formatRemainingChanges(
-                  mainCatalog,
-                  branchCatalog,
-                  remainingChanges,
-                );
-                result.remainingSql = remainingSql;
-                result.applyError =
-                  remainingSql || "Remaining changes after adjacent apply";
-              }
-            } catch (err: unknown) {
-              const message = err instanceof Error ? err.message : String(err);
-              result.applyStatus = "error";
-              result.applyError = message;
-              result.applyFailedStatement = failedStatement;
-            } finally {
               try {
-                await mainPool.query("ROLLBACK");
-              } catch {
-                // Connection may have been interrupted; ignore rollback errors.
+                await mainPool.query("BEGIN");
+                await mainPool.query("SET LOCAL check_function_bodies = false");
+
+                for (const statement of planResult.plan.statements) {
+                  failedStatement = statement;
+                  await mainPool.query(statement);
+                }
+
+                const mainCatalog = await extractCatalog(mainPool);
+                const branchCatalog = await extractCatalog(branchPool);
+                result.sourceCatalog = mainCatalog;
+                result.targetCatalog = branchCatalog;
+                const allChanges = diffCatalogs(mainCatalog, branchCatalog);
+                const remainingChanges = compiledFilter
+                  ? allChanges.filter(compiledFilter)
+                  : allChanges;
+
+                result.remainingChanges = remainingChanges.length;
+                result.applyStatus =
+                  remainingChanges.length === 0 ? "success" : "error";
+
+                if (remainingChanges.length > 0) {
+                  const { remainingSql } = formatRemainingChanges(
+                    mainCatalog,
+                    branchCatalog,
+                    remainingChanges,
+                  );
+                  result.remainingSql = remainingSql;
+                  result.applyError =
+                    remainingSql || "Remaining changes after adjacent apply";
+                }
+              } catch (err: unknown) {
+                const message =
+                  err instanceof Error ? err.message : String(err);
+                result.applyStatus = "error";
+                result.applyError = message;
+                result.applyFailedStatement = failedStatement;
+              } finally {
+                try {
+                  await mainPool.query("ROLLBACK");
+                } catch {
+                  // Connection may have been interrupted; ignore rollback errors.
+                }
               }
             }
           }
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          result.planStatus = "error";
+          result.planError = message;
         }
-      } catch (err: unknown) {
-        const message = err instanceof Error ? err.message : String(err);
-        result.planStatus = "error";
-        result.planError = message;
+
+        results.push(result);
+
+        await mainPool.query(migration.sql).catch((err) => {
+          throw new Error(
+            `Migration ${migration.filename} failed while advancing main during adjacent smoke: ${err.message}`,
+            { cause: err },
+          );
+        });
       }
 
-      results.push(result);
-
-      await mainPool.query(migration.sql).catch((err) => {
-        throw new Error(
-          `Migration ${migration.filename} failed while advancing main during adjacent smoke: ${err.message}`,
-          { cause: err },
+      const failures = results.filter(
+        (result) =>
+          result.planStatus === "error" || result.applyStatus === "error",
+      );
+      if (failures.length > 0) {
+        const summary = formatSmokeResultsSummary(
+          fixture,
+          "adjacent",
+          image,
+          results,
+          applicable.skippedMigrations,
         );
-      });
-    }
-
-    const failures = results.filter(
-      (result) =>
-        result.planStatus === "error" || result.applyStatus === "error",
-    );
-    if (failures.length > 0) {
-      const summary = formatSmokeResultsSummary(
-        fixture,
-        "adjacent",
-        image,
-        results,
-        applicable.skippedMigrations,
-      );
-      const firstFailure = failures[0];
-      const artifacts = await writeScenarioFailureArtifacts({
-        fixture,
-        scenarioName: "adjacent",
-        image,
-        errorMessage: summary,
-        step: firstFailure.step,
-        migrationName: firstFailure.migrationApplied,
-        skippedMigrations: applicable.skippedMigrations,
-        planSql: firstFailure.planSql,
-        remainingSql: firstFailure.remainingSql,
-        sourceCatalog: firstFailure.sourceCatalog,
-        targetCatalog: firstFailure.targetCatalog,
-      });
-      throw new Error(
-        `${summary}\n\nFailure artifacts: ${artifacts.reportPath}`,
-      );
-    }
-  });
+        const firstFailure = failures[0];
+        const artifacts = await writeScenarioFailureArtifacts({
+          fixture,
+          scenarioName: "adjacent",
+          image,
+          errorMessage: summary,
+          step: firstFailure.step,
+          migrationName: firstFailure.migrationApplied,
+          skippedMigrations: applicable.skippedMigrations,
+          planSql: firstFailure.planSql,
+          remainingSql: firstFailure.remainingSql,
+          sourceCatalog: firstFailure.sourceCatalog,
+          targetCatalog: firstFailure.targetCatalog,
+        });
+        throw new Error(
+          `${summary}\n\nFailure artifacts: ${artifacts.reportPath}`,
+        );
+      }
+    },
+  );
 }

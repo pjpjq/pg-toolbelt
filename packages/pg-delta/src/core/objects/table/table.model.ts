@@ -12,6 +12,10 @@ import {
   type PrivilegeProps,
   privilegePropsSchema,
 } from "../base.privilege-diff.ts";
+import {
+  type ExtractRetryOptions,
+  extractWithDefinitionRetry,
+} from "../extract-with-retry.ts";
 
 const RelationPersistenceSchema = z.enum([
   "p", // permanent
@@ -82,6 +86,15 @@ const tableConstraintPropsSchema = z.object({
 
 export type TableConstraintProps = z.infer<typeof tableConstraintPropsSchema>;
 
+// pg_get_constraintdef(oid, pretty) can return NULL under the same conditions
+// as pg_get_indexdef: races with concurrent DDL, transient catalog
+// inconsistencies, recovery edges. An unreadable constraint cannot be diffed,
+// so we accept NULL here and filter the constraint out at extraction time
+// rather than crashing the whole catalog parse with a ZodError.
+const tableConstraintRowSchema = tableConstraintPropsSchema.extend({
+  definition: z.string().nullable(),
+});
+
 const tablePropsSchema = z.object({
   schema: z.string(),
   name: z.string(),
@@ -108,8 +121,13 @@ const tablePropsSchema = z.object({
   privileges: z.array(privilegePropsSchema),
 });
 
+const tableRowSchema = tablePropsSchema.extend({
+  constraints: z.array(tableConstraintRowSchema).optional(),
+});
+
 type TablePrivilegeProps = PrivilegeProps;
 export type TableProps = z.infer<typeof tablePropsSchema>;
+type TableRow = z.infer<typeof tableRowSchema>;
 
 export class Table extends BasePgModel implements TableLikeObject {
   public readonly schema: TableProps["schema"];
@@ -220,8 +238,17 @@ export class Table extends BasePgModel implements TableLikeObject {
   }
 }
 
-export async function extractTables(pool: Pool): Promise<Table[]> {
-  const { rows: tableRows } = await pool.query<TableProps>(sql`
+export async function extractTables(
+  pool: Pool,
+  options?: ExtractRetryOptions,
+): Promise<Table[]> {
+  const tableRows = await extractWithDefinitionRetry({
+    label: "table constraints",
+    options,
+    hasNullDefinition: (row: TableRow) =>
+      row.constraints?.some((c) => c.definition === null) ?? false,
+    query: async () => {
+      const result = await pool.query<TableProps>(sql`
 with extension_oids as (
   select objid
   from pg_depend d
@@ -470,9 +497,14 @@ group by
 order by
   t.schema, t.name
   `);
-  // Validate and parse each row using the Zod schema
-  const validatedRows = tableRows.map((row: unknown) =>
-    tablePropsSchema.parse(row),
-  );
+      return result.rows.map((row: unknown) => tableRowSchema.parse(row));
+    },
+  });
+  const validatedRows = tableRows.map((row): TableProps => {
+    const filteredConstraints = row.constraints?.filter(
+      (c): c is TableConstraintProps => c.definition !== null,
+    );
+    return { ...row, constraints: filteredConstraints };
+  });
   return validatedRows.map((row: TableProps) => new Table(row));
 }

@@ -6,6 +6,10 @@ import {
   type PrivilegeProps,
   privilegePropsSchema,
 } from "../base.privilege-diff.ts";
+import {
+  type ExtractRetryOptions,
+  extractWithDefinitionRetry,
+} from "../extract-with-retry.ts";
 
 const FunctionKindSchema = z.enum([
   "f", // function
@@ -64,6 +68,15 @@ const procedurePropsSchema = z.object({
   owner: z.string(),
   comment: z.string().nullable(),
   privileges: z.array(privilegePropsSchema),
+});
+
+// pg_get_functiondef(oid) can return NULL when the function (its pg_proc
+// row) is dropped between catalog scan and resolution, or under transient
+// catalog state. An unreadable function cannot be diffed, so we accept NULL
+// here and filter the row out at extraction time rather than crashing the
+// whole catalog parse with a ZodError.
+const procedureRowSchema = procedurePropsSchema.extend({
+  definition: z.string().nullable(),
 });
 
 type ProcedurePrivilegeProps = PrivilegeProps;
@@ -183,8 +196,16 @@ export class Procedure extends BasePgModel {
   }
 }
 
-export async function extractProcedures(pool: Pool): Promise<Procedure[]> {
-  const { rows: procedureRows } = await pool.query<ProcedureProps>(sql`
+export async function extractProcedures(
+  pool: Pool,
+  options?: ExtractRetryOptions,
+): Promise<Procedure[]> {
+  const procedureRows = await extractWithDefinitionRetry({
+    label: "procedures",
+    options,
+    hasNullDefinition: (row) => row.definition === null,
+    query: async () => {
+      const result = await pool.query<ProcedureProps>(sql`
 with extension_oids as (
   select
     objid
@@ -256,9 +277,11 @@ from
 order by
   1, 2
   `);
-  // Validate and parse each row using the Zod schema
-  const validatedRows = procedureRows.map((row: unknown) =>
-    procedurePropsSchema.parse(row),
+      return result.rows.map((row: unknown) => procedureRowSchema.parse(row));
+    },
+  });
+  const validatedRows = procedureRows.filter(
+    (row): row is ProcedureProps => row.definition !== null,
   );
   return validatedRows.map((row: ProcedureProps) => new Procedure(row));
 }

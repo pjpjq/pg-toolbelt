@@ -11,6 +11,10 @@ import {
   type PrivilegeProps,
   privilegePropsSchema,
 } from "../base.privilege-diff.ts";
+import {
+  type ExtractRetryOptions,
+  extractWithDefinitionRetry,
+} from "../extract-with-retry.ts";
 import { ReplicaIdentitySchema } from "../table/table.model.ts";
 
 const viewPropsSchema = z.object({
@@ -32,6 +36,15 @@ const viewPropsSchema = z.object({
   comment: z.string().nullable(),
   columns: z.array(columnPropsSchema),
   privileges: z.array(privilegePropsSchema),
+});
+
+// pg_get_viewdef(oid) can return NULL when the underlying view (or its
+// pg_rewrite row) is dropped between catalog scan and resolution, or under
+// transient catalog state during recovery. An unreadable view cannot be
+// diffed, so we accept NULL here and filter the row out at extraction time
+// rather than crashing the whole catalog parse with a ZodError.
+const viewRowSchema = viewPropsSchema.extend({
+  definition: z.string().nullable(),
 });
 
 type ViewPrivilegeProps = PrivilegeProps;
@@ -126,8 +139,16 @@ export class View extends BasePgModel implements TableLikeObject {
   }
 }
 
-export async function extractViews(pool: Pool): Promise<View[]> {
-  const { rows: viewRows } = await pool.query<ViewProps>(sql`
+export async function extractViews(
+  pool: Pool,
+  options?: ExtractRetryOptions,
+): Promise<View[]> {
+  const viewRows = await extractWithDefinitionRetry({
+    label: "views",
+    options,
+    hasNullDefinition: (row) => row.definition === null,
+    query: async () => {
+      const result = await pool.query<ViewProps>(sql`
 with extension_oids as (
   select
     objid
@@ -254,9 +275,11 @@ group by
 order by
   v.schema, v.name
   `);
-  // Validate and parse each row using the Zod schema
-  const validatedRows = viewRows.map((row: unknown) =>
-    viewPropsSchema.parse(row),
+      return result.rows.map((row: unknown) => viewRowSchema.parse(row));
+    },
+  });
+  const validatedRows = viewRows.filter(
+    (row): row is ViewProps => row.definition !== null,
   );
   return validatedRows.map((row: ViewProps) => new View(row));
 }

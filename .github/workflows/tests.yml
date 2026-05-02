@@ -130,7 +130,7 @@ jobs:
         with:
           name: coverage-pg-delta-unit
           path: packages/pg-delta/.nyc_output/
-          retention-days: 1
+          retention-days: 7
           include-hidden-files: true
 
   pg-delta-integration:
@@ -186,7 +186,7 @@ jobs:
         with:
           name: coverage-integration-pg${{ matrix.postgres_version }}-shard-${{ matrix.shard_index }}
           path: packages/pg-delta/.nyc_output/
-          retention-days: 1
+          retention-days: 7
           include-hidden-files: true
 
   pg-delta-integration-pg15-compat:
@@ -319,7 +319,7 @@ jobs:
         with:
           name: coverage-pg-topo
           path: packages/pg-topo/.nyc_output/
-          retention-days: 1
+          retention-days: 7
           include-hidden-files: true
 
   deno2-library-e2e:

@@ -171,6 +171,7 @@ for (const pgVersion of versions) {
     });
     await waitForPool(pool);
     await applySupabaseBaseInit(pool, pgVersion);
+    await pool.query("ANALYZE");
 
     const mA = await measurePhases(pool);
     console.log(formatRow("base-init only", pgVersion, mA));
@@ -187,6 +188,7 @@ for (const pgVersion of versions) {
       },
     });
     await pool.query(largeSql);
+    await pool.query("ANALYZE");
     const mB = await measurePhases(pool);
     console.log(
       formatRow(`+ synthetic schema (N=${E2E_TABLE_COUNT})`, pgVersion, mB),

@@ -265,6 +265,8 @@ for (const pgVersion of versions) {
 
     await mainPool.query(largeMain);
     await branchPool.query(largeBranch);
+    await mainPool.query("ANALYZE");
+    await branchPool.query("ANALYZE");
 
     const mIdentical = await measureFullDiffPhases(mainPool, branchPool);
     console.log(formatRow("twin schema (no mutations)", pgVersion, mIdentical));

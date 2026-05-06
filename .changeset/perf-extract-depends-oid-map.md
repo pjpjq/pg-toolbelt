@@ -2,50 +2,72 @@
 "@supabase/pg-delta": minor
 ---
 
-perf(extractCatalog): 95% wall-time reduction via OID-map + auto-ANALYZE
+perf(extractDepends): split monolithic DEPENDS_SQL via OID-map (-77% steady-state extract)
 
-`extractCatalog` previously spent ~95% of its wall time inside
-`extractDepends`'s monolithic 1370-line `DEPENDS_SQL`, which materialised
-the catalog-dependency graph entirely server-side: a 30-branch `objects`
-CTE formatted stable-ids for every pg_depend OID, then a `base` CTE
-joined pg_depend × objects on both sides to produce edge tuples. The
-intermediate CTE was scanned 6+ times by downstream synthesised CTEs,
-and stale planner statistics — typical right after a bulk schema build,
-before autovacuum has caught up — pushed the query into an O(N²) plan
-that ran for 5-10 seconds even on modest catalogs.
+`extractDepends` previously executed a single 1370-line `DEPENDS_SQL`
+that materialised the catalog-dependency graph entirely server-side: a
+30-branch `objects` CTE formatted stable-ids for every `pg_depend` OID,
+then a `base` CTE joined `pg_depend × objects` on both sides to produce
+edge tuples. The intermediate `base` was scanned 6+ times by the
+downstream synthesised CTEs (comments, view-rewrite rels/cols, FK
+constraints, ownership, publications, FDW, etc.), and its size grew with
+the square of distinct (classid, objid) pairs.
 
-Two changes:
+The refactor moves stable-id construction from SQL to TS:
 
-1. Move stable-id construction from SQL to TS. Splits depends extraction
-   into three queries: `RAW_DEPENDS_SQL` returns raw pg_depend tuples,
-   `OID_IDENTITY_SQL` returns a (classid, objid, objsubid) → stable_id
-   table, and the trimmed `DEPENDS_SQL` keeps just the synthesised
-   per-class CTEs (comments, view rewrites, FK constraints, indexes,
-   ownership, publications, FDW, etc.). A new TS function
-   `translateRawDepends` joins the raw tuples to identity rows via an
-   OID map, replacing the SQL `base` CTE with a JS `Map` lookup. The
-   `LEFT JOIN objects` references in `view_rewrite_*_deps` were dropped
-   since each consumer already had inline `format()` fallbacks.
+- `RAW_DEPENDS_SQL` returns raw `pg_depend` tuples
+  (classid/objid/objsubid + ref triple + deptype) for `deptype IN
+  ('n','a')`.
+- `OID_IDENTITY_SQL` returns a `(classid, objid, objsubid) → (schema,
+  stable_id)` table, derived from the previous `objects` CTE without
+  the cross-join against `pg_depend`.
+- The trimmed `DEPENDS_SQL` keeps only the synthesised per-class CTEs
+  whose (dependent, referenced, deptype) tuples are *not* already in
+  `pg_depend` (or that need a different join shape than the base
+  translator).
+- A new TS `translateRawDepends` joins the raw tuples to identity rows
+  via a `Map`, replacing the SQL `base` CTE with O(N) JS lookups.
 
-2. `extractCatalog` now runs `ANALYZE` once before the parallel
-   extractor batch. Targeted analyse on individual pg_catalog tables
-   was insufficient (the planner needs a full pass to pick a sane plan
-   for the synthesised CTEs); database-wide `ANALYZE` is fast (~30-100
-   ms on a 400-table benchmark) and saves seconds of bad-plan cost when
-   stats are stale. Wrapped in try/catch so non-superusers without
-   MAINTAIN privilege fall back to existing stats silently.
+`extractCatalog` runs all four queries in `Promise.all` (raw depends,
+identity, synth depends, privilege/membership) and concatenates the
+results without a cross-source dedup — see the comment block in
+`extractDepends` for why the four sources' (dependent, referenced,
+deptype) tuples are disjoint by construction.
 
-Bench numbers (`bench:e2e`, pg17, N=400, post-base-init synthetic
-schema):
+### Bench
 
-| | before | after |
-|---|---|---|
-| `extractCatalog` wall | 6733 ms | **312 ms (-95%)** |
-| `extractDepends` (serial) | 6726 ms | 88 ms (-99%) |
-| `DEPENDS_SQL` | ~700 ms (post-ANALYZE) | 70 ms |
-| `total_ms` (extract+diff+sort+plan) | 8448 ms | **2007 ms (-76%)** |
+`bench:e2e` + `bench:quick-extract`, pg17 supabase image,
+N=400-table synthetic schema, p50 of 5 iterations.
 
-After this change `sortChanges` (issue #250's primary target) becomes
-the dominant cost at ~74% of total wall time on this scenario.
+Steady-state (post-`ANALYZE`, the realistic case for any
+already-warm production database):
+
+| | before (`ba7d67c`) | after | |
+|---|---|---|---|
+| `extractCatalog` wall | 755.67 ms | **171.29 ms** | **−77%** |
+| `extractDepends` (prod) | 702.06 ms | 93.61 ms | −87% |
+| `DEPENDS_SQL` only | 644.80 ms | 71.24 ms | −89% |
+
+Cold-start (freshly-loaded schema, planner statistics still stale —
+typical immediately after a bulk-import migration):
+
+| | before (`ba7d67c`) | after | |
+|---|---|---|---|
+| `extractCatalog` wall | ~6700 ms | 6415.06 ms | ~−5% |
+
+Both cold-start runs spend ~98% of wall time inside the synthesised
+`DEPENDS_SQL` (which still does heavy `pg_depend × pg_class × …`
+joins). Running `ANALYZE` against the target database before extracting
+collapses cold-start back to the steady-state row above; pg-delta does
+not run `ANALYZE` itself because mutating server state inside a
+read-only extractor is a footgun.
+
+### Behaviour
+
+No observable change to `catalog.depends` for any tested scenario
+(integration suite, declarative export, supabase-base-init, dbdev
+roundtrip). The OID-split is a pure refactor that moves work from SQL
+to JS without changing the (dependent_stable_id, referenced_stable_id,
+deptype) tuple set the extractor returns.
 
 Refs #250.

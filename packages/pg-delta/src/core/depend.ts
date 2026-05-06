@@ -520,7 +520,7 @@ async function extractPrivilegeAndMembershipDepends(
  * CTE entirely server-side and was the single biggest server-cost in catalog
  * extraction.
  */
-export const RAW_DEPENDS_SQL = sql`
+const RAW_DEPENDS_SQL = sql`
   SELECT
     classid::int        AS classid,
     objid::int          AS objid,
@@ -540,7 +540,7 @@ export const RAW_DEPENDS_SQL = sql`
  * stable_id and schema name. The TS translator builds a `Map` from these rows
  * to look up stable_ids when materialising raw pg_depend edges.
  */
-export const OID_IDENTITY_SQL = sql`
+const OID_IDENTITY_SQL = sql`
   WITH ids AS (
     -- only the objects that actually show up in dependencies (both sides)
     SELECT DISTINCT classid, objid, objsubid FROM pg_depend WHERE deptype IN ('n','a')
@@ -1985,15 +1985,47 @@ export async function extractDepends(pool: Pool): Promise<PgDepend[]> {
     pool.query<RawDependRow>(RAW_DEPENDS_SQL),
     pool.query<OidIdentityRow>(OID_IDENTITY_SQL),
     pool.query<PgDepend>(DEPENDS_SQL),
-    extractPrivilegeAndMembershipDepends(pool),
+    pool
+      .query<PgDepend>(PRIVILEGE_AND_MEMBERSHIP_DEPENDS_SQL)
+      .then((result) => result.rows),
   ]);
 
   const oidMap = buildOidStableIdMap(identityResult.rows);
   const translatedDepends = translateRawDepends(rawDependsResult.rows, oidMap);
 
-  // Stable-id namespaces are disjoint between the four sources, so a simple
-  // concat is correct (no dedup needed across sources). Sort by codepoint
-  // for deterministic output.
+  // Why we don't dedup across the four sources:
+  //
+  // 1. PRIVILEGE_AND_MEMBERSHIP_DEPENDS_SQL only emits `acl:`, `aclcol:`,
+  //    `defacl:`, and `membership:` dependents, none of which are produced
+  //    by either `translateRawDepends` (the base translator) or DEPENDS_SQL
+  //    (the synth CTEs).
+  //
+  // 2. The base translator emits real-object stable-ids derived from the
+  //    OID identity table (table:, view:, materializedView:, foreignTable:,
+  //    sequence:, column:, type:, domain:, multirange:, constraint:,
+  //    rlsPolicy:, rule:, trigger:, procedure:, aggregate:, language:,
+  //    eventTrigger:, extension:, publication:, subscription:,
+  //    foreignDataWrapper:, server:, userMapping:, defaultAcl:, schema:,
+  //    tsConfig:, tsDict:, tsTemplate:, plus `unknown:` for catalog rows
+  //    not listed in OID_IDENTITY_SQL).
+  //
+  // 3. The synth CTEs in DEPENDS_SQL only emit edges that are NOT in
+  //    pg_depend at all (ownership_deps, index_*_deps, publication*_deps,
+  //    fdw_deps, comment_deps), or that are derived from pg_depend rows
+  //    via a JOIN that produces a different (dependent, referenced) tuple
+  //    than the base translator would (view_rewrite_rel_deps maps the
+  //    pg_depend row's classid=pg_rewrite onto the owning view via
+  //    `r.ev_class`, so the dependent is `view:...` rather than the base
+  //    translator's `rule:...`; constraint_deps maps an FK to the
+  //    referenced unique CONSTRAINT rather than the unique INDEX recorded
+  //    in pg_depend).
+  //
+  // Adding a new synth CTE that mirrors a (dependent, referenced, deptype)
+  // tuple already produced by the base translator would silently
+  // double-count edges. If you add such a CTE, either fold it into the
+  // base translator instead, or reintroduce a cross-source dedup here.
+  //
+  // Sort by codepoint for deterministic output (ASCII stable_ids).
   const merged = translatedDepends.concat(
     synthDependsResult.rows,
     privilegeDepends,

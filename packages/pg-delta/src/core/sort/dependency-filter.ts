@@ -175,6 +175,55 @@ export function getEdgesInCycle(
 }
 
 /**
+ * Filter edges involved in cycles based on their constraint's cycle-breaking rules.
+ *
+ * This is applied when cycles are detected to break them by removing problematic edges.
+ * Only filters edges that:
+ * 1. Are part of the detected cycle(s)
+ * 2. Have a reason (stable ID dependency) - custom constraints are never filtered
+ * 3. Match the cycle-breaking filter criteria
+ */
+export function filterEdgesForCycleBreaking(
+  edges: Edge[],
+  cycleNodeIndexes: number[],
+  phaseChanges: Change[],
+  graphData: GraphData,
+): Edge[] {
+  // Get edges that are part of the cycle
+  const cycleEdges = getEdgesInCycle(cycleNodeIndexes, edges);
+  // Use string keys for comparison since Set.has() uses reference equality
+  const cycleEdgeKeys = new Set(
+    cycleEdges.map((e) => `${e.sourceIndex}->${e.targetIndex}`),
+  );
+
+  return edges.filter((edge) => {
+    const edgeKey = `${edge.sourceIndex}->${edge.targetIndex}`;
+    // If edge is not in the cycle, keep it
+    if (!cycleEdgeKeys.has(edgeKey)) {
+      return true;
+    }
+
+    // Edge is in cycle - check if it should be filtered
+    const constraint = edge.constraint;
+
+    // Custom constraints are never filtered
+    if (constraint.source === "custom") return true;
+
+    const { dependentStableId, referencedStableId } = constraint.reason;
+    // Skip if dependentStableId is undefined (explicit requirement without created IDs)
+    if (!dependentStableId) return true;
+
+    // Apply cycle-breaking filters - return false to filter out this edge
+    return !shouldFilterStableIdDependencyForCycleBreaking(
+      dependentStableId,
+      referencedStableId,
+      phaseChanges,
+      graphData,
+    );
+  });
+}
+
+/**
  * Pre-filter edges that close a known 2-cycle pattern, before the per-cycle
  * loop in `attemptSortRound` ever runs.
  *
@@ -230,54 +279,5 @@ export function preemptivelyFilterIntrinsicallyBreakableEdges(
     // is also present (proving the 2-cycle actually exists in this plan).
     const reverseKey = `${edge.targetIndex}->${edge.sourceIndex}`;
     return !edgeKeys.has(reverseKey);
-  });
-}
-
-/**
- * Filter edges involved in cycles based on their constraint's cycle-breaking rules.
- *
- * This is applied when cycles are detected to break them by removing problematic edges.
- * Only filters edges that:
- * 1. Are part of the detected cycle(s)
- * 2. Have a reason (stable ID dependency) - custom constraints are never filtered
- * 3. Match the cycle-breaking filter criteria
- */
-export function filterEdgesForCycleBreaking(
-  edges: Edge[],
-  cycleNodeIndexes: number[],
-  phaseChanges: Change[],
-  graphData: GraphData,
-): Edge[] {
-  // Get edges that are part of the cycle
-  const cycleEdges = getEdgesInCycle(cycleNodeIndexes, edges);
-  // Use string keys for comparison since Set.has() uses reference equality
-  const cycleEdgeKeys = new Set(
-    cycleEdges.map((e) => `${e.sourceIndex}->${e.targetIndex}`),
-  );
-
-  return edges.filter((edge) => {
-    const edgeKey = `${edge.sourceIndex}->${edge.targetIndex}`;
-    // If edge is not in the cycle, keep it
-    if (!cycleEdgeKeys.has(edgeKey)) {
-      return true;
-    }
-
-    // Edge is in cycle - check if it should be filtered
-    const constraint = edge.constraint;
-
-    // Custom constraints are never filtered
-    if (constraint.source === "custom") return true;
-
-    const { dependentStableId, referencedStableId } = constraint.reason;
-    // Skip if dependentStableId is undefined (explicit requirement without created IDs)
-    if (!dependentStableId) return true;
-
-    // Apply cycle-breaking filters - return false to filter out this edge
-    return !shouldFilterStableIdDependencyForCycleBreaking(
-      dependentStableId,
-      referencedStableId,
-      phaseChanges,
-      graphData,
-    );
   });
 }

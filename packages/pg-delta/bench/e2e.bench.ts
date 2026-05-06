@@ -205,3 +205,5 @@ for (const pgVersion of versions) {
     await container?.stop().catch(() => {});
   }
 }
+
+process.exit(process.exitCode ?? 0);

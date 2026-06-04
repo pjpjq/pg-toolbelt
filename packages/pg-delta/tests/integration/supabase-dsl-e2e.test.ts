@@ -73,6 +73,59 @@ describe(`supabase integration e2e (pg${pgVersion})`, () => {
   );
 
   test(
+    "captures user-defined SECURITY DEFINER trigger on auth.users (issue #252 repro)",
+    withDbSupabaseIsolated(pgVersion, async (db) => {
+      // Verbatim repro from https://github.com/supabase/pg-toolbelt/issues/252.
+      // Differs from the #254 test above: the trigger function is created
+      // without an explicit schema (lands in `public` via search_path), is
+      // declared `SECURITY DEFINER`, and the dependent `customer` table FKs
+      // into `auth.users`. Pins that this exact shape now emits the trigger.
+      await db.branch.query(dedent`
+        SET ROLE postgres;
+
+        CREATE TABLE customer (
+          id uuid PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE
+        );
+
+        CREATE OR REPLACE FUNCTION tg_create_customer_after_user_insert()
+        RETURNS trigger
+        SECURITY DEFINER AS $$
+        BEGIN
+          INSERT INTO customer (id) VALUES (NEW.id);
+          RETURN NEW;
+        END;
+        $$ LANGUAGE plpgsql;
+
+        CREATE OR REPLACE TRIGGER tg_customer_after_user_insert
+        AFTER INSERT ON auth.users
+        FOR EACH ROW
+        EXECUTE FUNCTION tg_create_customer_after_user_insert();
+
+        RESET ROLE;
+      `);
+
+      if (!supabaseIntegration.filter || !supabaseIntegration.serialize) {
+        throw new Error("supabase integration missing filter or serialize");
+      }
+
+      const planResult = await createPlan(db.main, db.branch, {
+        filter: supabaseIntegration.filter,
+        serialize: supabaseIntegration.serialize,
+      });
+
+      const triggerStatements = planResult?.plan.statements.filter((s) =>
+        s.includes("CREATE TRIGGER tg_customer_after_user_insert"),
+      );
+      expect(triggerStatements).toMatchInlineSnapshot(`
+        [
+          "CREATE TRIGGER tg_customer_after_user_insert AFTER INSERT ON users FOR EACH ROW EXECUTE FUNCTION tg_create_customer_after_user_insert()",
+        ]
+      `);
+    }),
+    120_000,
+  );
+
+  test(
     "captures pg_net extension drops in createPlan",
     withDbSupabaseIsolated(pgVersion, async (db) => {
       await db.main.query(installPgNetSql);

@@ -1,5 +1,11 @@
 # @supabase/pg-delta
 
+## 1.0.0-alpha.28
+
+### Patch Changes
+
+- f95e0a8: Recreate RLS policies that depend on replaced functions.
+
 ## 1.0.0-alpha.27
 
 ### Minor Changes

@@ -11,7 +11,7 @@ import { analyzeAndSortFromRandomizedStatements } from "./support/randomized-run
 
 const fixtureRoot = path.resolve(import.meta.dir, "fixtures/diverse-schema");
 const baselineFingerprint =
-  "062a5cc44e1970ecf8feb43f9640ad127dfbb450aa699432502c915d4a4bb70e";
+  "c0f219f81402141b611af545acd68b18d5615c2e960874a1464814e3d8ff7e3f";
 
 let baselineResult: AnalyzeResult;
 let looseValidationDiagnosticsPromise: Promise<RuntimeDiagnostic[]> | null =

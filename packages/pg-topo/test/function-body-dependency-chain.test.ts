@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { analyzeAndSort } from "../src/analyze-and-sort";
 import { validateAnalyzeResultWithPostgres } from "./support/postgres-validation";
+import { shuffleDeterministic } from "./support/shuffle";
 
 const complexFunctionChainStatements = [
   `
@@ -95,26 +96,6 @@ create table app.organizations (
 create schema app;
 `,
 ];
-
-const seededRandom = (seed: number): (() => number) => {
-  let state = seed >>> 0;
-  return () => {
-    state = (state * 1664525 + 1013904223) >>> 0;
-    return state / 4294967296;
-  };
-};
-
-const shuffleDeterministic = <T>(items: T[], seed: number): T[] => {
-  const random = seededRandom(seed);
-  const cloned = [...items];
-  for (let index = cloned.length - 1; index > 0; index -= 1) {
-    const randomIndex = Math.floor(random() * (index + 1));
-    const current = cloned[index];
-    cloned[index] = cloned[randomIndex] as T;
-    cloned[randomIndex] = current as T;
-  }
-  return cloned;
-};
 
 const defaultParamOverloadStatements = [
   "create schema auth;",

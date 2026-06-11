@@ -154,6 +154,24 @@ const extractCreateTableAsDependencies = (
   return { provides, requires };
 };
 
+const addConstraintExpressionDependencies = (
+  constraint: Record<string, unknown> | undefined,
+  requires: ObjectRef[],
+): void => {
+  if (!constraint) {
+    return;
+  }
+  for (const expressionNode of [
+    constraint.raw_expr,
+    constraint.exclusions,
+    constraint.where_clause,
+  ]) {
+    if (expressionNode) {
+      addExpressionDependencies(expressionNode, requires);
+    }
+  }
+};
+
 const extractAlterTableDependencies = (
   statementNode: Record<string, unknown>,
 ): ExtractDependenciesResult => {
@@ -172,6 +190,7 @@ const extractAlterTableDependencies = (
   for (const commandNode of commands) {
     const command = asRecord(asRecord(commandNode)?.AlterTableCmd);
     const constraint = asRecord(asRecord(command?.def)?.Constraint);
+    const columnDefinition = asRecord(asRecord(command?.def)?.ColumnDef);
     if (constraint?.contype === "CONSTR_FOREIGN") {
       addForeignConstraintDependencies(constraint, requires);
     }
@@ -187,6 +206,46 @@ const extractAlterTableDependencies = (
       if (providedKey) {
         provides.push(providedKey);
       }
+    }
+    addConstraintExpressionDependencies(constraint, requires);
+
+    if (columnDefinition?.raw_default) {
+      addExpressionDependencies(columnDefinition.raw_default, requires);
+    }
+    const typeRef = typeFromTypeNameNode(columnDefinition?.typeName);
+    if (typeRef) {
+      requires.push(typeRef);
+    }
+    const columnConstraints = Array.isArray(columnDefinition?.constraints)
+      ? columnDefinition.constraints
+      : [];
+    for (const constraintItem of columnConstraints) {
+      const columnConstraint = asRecord(asRecord(constraintItem)?.Constraint);
+      if (columnConstraint?.contype === "CONSTR_FOREIGN") {
+        addForeignConstraintDependencies(columnConstraint, requires);
+      }
+      if (
+        relationTableRef &&
+        (columnConstraint?.contype === "CONSTR_PRIMARY" ||
+          columnConstraint?.contype === "CONSTR_UNIQUE")
+      ) {
+        const columnName =
+          typeof columnDefinition?.colname === "string"
+            ? columnDefinition.colname
+            : undefined;
+        const providedKey = keyRefForTableColumns(
+          relationTableRef,
+          constraintKeyColumns(columnConstraint, columnName),
+        );
+        if (providedKey) {
+          provides.push(providedKey);
+        }
+      }
+      addConstraintExpressionDependencies(columnConstraint, requires);
+    }
+
+    if (command?.subtype === "AT_ColumnDefault" && command.def) {
+      addExpressionDependencies(command.def, requires);
     }
 
     if (command?.subtype === "AT_ChangeOwner") {

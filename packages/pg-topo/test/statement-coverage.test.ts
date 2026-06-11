@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { analyzeAndSort } from "../src/analyze-and-sort";
+import { validateAnalyzeResultWithPostgres } from "./support/postgres-validation";
 
 describe("statement coverage", () => {
   test("orders enum type before table using it", async () => {
@@ -158,6 +159,90 @@ describe("statement coverage", () => {
     expect(fnIndex).toBeGreaterThan(-1);
     expect(viewIndex).toBeGreaterThan(fnIndex);
   });
+
+  test("orders create rule after target table and WHERE predicate function", async () => {
+    const result = await analyzeAndSort([
+      "create rule users_insert_guard as on insert to app.users where app.allow_insert(new.owner_id) do instead nothing;",
+      "create function app.allow_insert(owner_id int) returns boolean language sql immutable as $$ select true $$;",
+      "create table app.users(id int primary key, owner_id int not null);",
+      "create schema app;",
+    ]);
+    const unknownDiagnostics = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNKNOWN_STATEMENT_CLASS",
+    );
+    const unresolvedDiagnostics = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNRESOLVED_DEPENDENCY",
+    );
+    const orderedSql = result.ordered.map((statement) =>
+      statement.sql.toLowerCase(),
+    );
+    const functionIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create function app.allow_insert"),
+    );
+    const tableIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create table app.users"),
+    );
+    const ruleIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create rule users_insert_guard"),
+    );
+    const ruleStatement = result.ordered.find((statement) =>
+      statement.sql.toLowerCase().includes("users_insert_guard"),
+    );
+    const validation = await validateAnalyzeResultWithPostgres(result);
+
+    expect(unknownDiagnostics).toHaveLength(0);
+    expect(unresolvedDiagnostics).toHaveLength(0);
+    expect(ruleStatement?.provides).toContainEqual({
+      kind: "rule",
+      schema: "app",
+      name: "users.users_insert_guard",
+    });
+    expect(tableIndex).toBeGreaterThan(-1);
+    expect(functionIndex).toBeGreaterThan(tableIndex);
+    expect(ruleIndex).toBeGreaterThan(functionIndex);
+    expect(validation.diagnostics).toHaveLength(0);
+  }, 120000);
+
+  test("orders create rule after action query function and relations", async () => {
+    const result = await analyzeAndSort([
+      "create rule incoming_users_insert as on insert to app.incoming_users do instead insert into app.users(owner_id, normalized_name) values (new.owner_id, app.normalize_name(new.raw_name));",
+      "create table app.users(id int generated always as identity primary key, owner_id int not null, normalized_name text not null);",
+      "create function app.normalize_name(value text) returns text language sql immutable as $$ select lower(value) $$;",
+      "create schema app;",
+      "create table app.incoming_users(owner_id int not null, raw_name text not null);",
+    ]);
+    const unknownDiagnostics = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNKNOWN_STATEMENT_CLASS",
+    );
+    const unresolvedDiagnostics = result.diagnostics.filter(
+      (diagnostic) => diagnostic.code === "UNRESOLVED_DEPENDENCY",
+    );
+    const orderedSql = result.ordered.map((statement) =>
+      statement.sql.toLowerCase(),
+    );
+    const targetTableIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create table app.incoming_users"),
+    );
+    const actionTableIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create table app.users"),
+    );
+    const functionIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create function app.normalize_name"),
+    );
+    const ruleIndex = orderedSql.findIndex((sql) =>
+      sql.includes("create rule incoming_users_insert"),
+    );
+    const validation = await validateAnalyzeResultWithPostgres(result);
+
+    expect(unknownDiagnostics).toHaveLength(0);
+    expect(unresolvedDiagnostics).toHaveLength(0);
+    expect(targetTableIndex).toBeGreaterThan(-1);
+    expect(actionTableIndex).toBeGreaterThan(-1);
+    expect(functionIndex).toBeGreaterThan(actionTableIndex);
+    expect(ruleIndex).toBeGreaterThan(targetTableIndex);
+    expect(ruleIndex).toBeGreaterThan(functionIndex);
+    expect(validation.diagnostics).toHaveLength(0);
+  }, 120000);
 
   test("resolves correct overload when multiple overloads have defaults", async () => {
     const result = await analyzeAndSort([

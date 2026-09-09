@@ -17,11 +17,13 @@
  */
 import { plan } from "../../plan/plan.ts";
 import { serializePlan } from "../../plan/artifact.ts";
+import { splitPlan } from "../../plan/baseline-commit.ts";
 import { encodeId, parseId, type StableId } from "../../core/stable-id.ts";
 import { exitIfBlocking, printDiagnostics } from "../diagnostics.ts";
 import { makePool } from "../pool.ts";
 import {
   parseFlags,
+  parsePositiveIntFlag,
   restrictToApplierFromFlags,
   UsageError,
 } from "../flags.ts";
@@ -41,7 +43,7 @@ const USAGE =
   `[--profile ${PROFILE_IDS}] ` +
   "[--renames auto|prompt|off] [--no-compact] [--out <plan.json>] " +
   "[--accept-rename <from>=<to>] ... [--restrict-to-applier] [--no-restrict-to-applier] [--strict-coverage] " +
-  "[--unsafe-show-secrets]\n";
+  "[--unsafe-show-secrets] [--max-locks <n>]\n";
 
 export function formatPlanIdentityWarning(
   code: DatabaseIdentityObservationUnavailableCode,
@@ -77,6 +79,7 @@ export async function cmdPlan(args: string[]): Promise<void> {
       "no-restrict-to-applier": { type: "boolean" },
       "strict-coverage": { type: "boolean" },
       "unsafe-show-secrets": { type: "boolean" },
+      "max-locks": { type: "value" },
     });
   } catch (err) {
     if (err instanceof UsageError) {
@@ -91,6 +94,7 @@ export async function cmdPlan(args: string[]): Promise<void> {
   const compact = !flags["no-compact"];
   const outPath = flags["out"];
   const acceptRenameRaw = flags["accept-rename"]; // string[]
+  const maxLocks = parsePositiveIntFlag("max-locks", flags["max-locks"]);
 
   // --renames default for CLI is "prompt"
   let renames: RenameMode = "prompt";
@@ -179,11 +183,13 @@ export async function cmdPlan(args: string[]): Promise<void> {
       ...(acceptRenames.length > 0 ? { acceptRenames } : {}),
       ...ctx.planOptions, // policy, capability, baseline (from the profile)
     };
-    const thePlan = plan(
+    const planned = plan(
       sourceResult.factBase,
       desiredResult.factBase,
       planOptions,
     );
+    const thePlan =
+      maxLocks !== undefined ? splitPlan(planned, { maxLocks }) : planned;
     printDiagnostics(thePlan.diagnostics ?? [], { label: "plan" });
     exitIfBlocking(thePlan.diagnostics ?? [], {
       strictCoverage: flags["strict-coverage"],

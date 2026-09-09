@@ -128,6 +128,34 @@ export function parseFlags<T extends FlagsDef>(
   return { flags: result as ParsedFlags<T>, positionals };
 }
 
+/** Parse a `--flag <n>` that must be a positive integer. Absent → undefined. */
+export function parsePositiveIntFlag(
+  flagName: string,
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined) return undefined;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 1) {
+    throw new UsageError(
+      `--${flagName} must be a positive integer, got ${raw}`,
+    );
+  }
+  return n;
+}
+
+/** `--max-locks` and `--split-to-fit` are mutually exclusive. */
+export function parseLockSplitFlags(flags: {
+  "max-locks"?: string | undefined;
+  "split-to-fit"?: boolean | undefined;
+}): { maxLocks?: number | undefined; splitToFit: boolean } {
+  const maxLocks = parsePositiveIntFlag("max-locks", flags["max-locks"]);
+  const splitToFit = flags["split-to-fit"] === true;
+  if (maxLocks !== undefined && splitToFit) {
+    throw new UsageError("use only one of --max-locks and --split-to-fit");
+  }
+  return { maxLocks, splitToFit };
+}
+
 /** Tri-state for resolveProfile: omitted → default probe; true → probe;
  *  false → unrestricted. CLI booleans are `false` when absent, so callers
  *  must not pass that through as `restrictToApplier`. */

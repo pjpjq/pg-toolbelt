@@ -734,7 +734,7 @@ export function plan(
   // the two cosmetic compaction passes are the ActionGraph phase
   // (./phases/action-graph.ts → ./internal.ts building blocks). Reads only the
   // emitted actions + producer/destroyer indexes + the two RESOLVED fact bases.
-  const { actions: finalActions, safetyReport } = finalizeActions({
+  const finalized = finalizeActions({
     actions,
     producerOf,
     destroyerOf,
@@ -751,8 +751,9 @@ export function plan(
     foldConstraints: options?.foldConstraints,
     rulesForId,
   });
+  const { safetyReport } = finalized;
 
-  const vaultDiags = vaultPresenceDiagnostics(desired, finalActions);
+  const vaultDiags = vaultPresenceDiagnostics(desired, finalized.actions);
 
   return stampPlanId({
     formatVersion: 1,
@@ -774,7 +775,7 @@ export function plan(
       // cosmetic compaction pass (./preamble.ts); compact:false restores the
       // unconditional preamble as the conservative opt-out.
       ...(options?.compact === false ||
-      needsCheckFunctionBodiesOff(finalActions)
+      needsCheckFunctionBodiesOff(finalized.actions)
         ? [{ name: "check_function_bodies", value: "off" }]
         : []),
     ],
@@ -811,7 +812,7 @@ export function plan(
           })),
         }
       : {}),
-    actions: finalActions,
+    actions: finalized.actions,
     safetyReport,
     // CREATE/DROP EXTENSION supabase_vault is generic; the warning is that
     // secret values/keys are not schema state. Omitted when empty so corpus

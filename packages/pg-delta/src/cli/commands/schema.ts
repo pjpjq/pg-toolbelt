@@ -69,8 +69,9 @@
  *   declarative SQL: the planner re-derives atomic DDL from the catalog diff
  *   between the shadow (desired) and target (current) states. --verbose shows
  *   every statement actually executed on the target connection — including
- *   transaction framing (BEGIN/COMMIT/ROLLBACK) and session SETs — never the
- *   authored files; --dry-run prints a portable executable script containing
+ *   transaction framing (BEGIN/COMMIT/ROLLBACK) and session SETs — never
+ *   the authored files; --dry-run prints
+ *   a portable executable script containing
  *   the same successful-path statements and segment boundaries, without
  *   applying them. It must be dispatched statement by statement on one session,
  *   stopping at the first error, with autocommit outside its explicit
@@ -170,7 +171,12 @@ import {
 } from "../reorder-display.ts";
 import { serializePlan } from "../../plan/artifact.ts";
 import type { ManagementScope } from "../../policy/view.ts";
-import { apply, type ApplyEvent } from "../../apply/apply.ts";
+import {
+  apply,
+  estimateLockTableBudget,
+  type ApplyEvent,
+} from "../../apply/apply.ts";
+import { splitPlan } from "../../plan/baseline-commit.ts";
 import { renderApplyScript } from "../../frontends/render-apply-script.ts";
 import { isDestructiveAction } from "../render.ts";
 import { encodeId, parseId, type StableId } from "../../core/stable-id.ts";
@@ -184,6 +190,7 @@ import {
 import {
   CliExit,
   parseFlags,
+  parseLockSplitFlags,
   restrictToApplierFromFlags,
   UsageError,
 } from "../flags.ts";
@@ -741,6 +748,8 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
       "trusted-local-host": { type: "multi" },
       "allow-remote-shadow": { type: "boolean" },
       "allow-same-database-identity": { type: "boolean" },
+      "max-locks": { type: "value" },
+      "split-to-fit": { type: "boolean" },
     });
   } catch (err) {
     if (err instanceof UsageError) {
@@ -748,7 +757,7 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
         `${err.message}\nUsage: pgdelta schema apply --dir <dir> --target <pg-url> [--shadow <pg-url>] ` +
           `[--renames auto|prompt|off] [--force] [--accept-rename <from>=<to>] ... ` +
           `[--profile ${PROFILE_IDS}] [--restrict-to-applier] [--no-restrict-to-applier] [--strict-coverage] [--strict-function-bodies] [--strict-data-statements] [--no-reorder] [--unsafe-show-secrets] [--isolated-shadow] [--scope database|cluster] [--skip-cluster-ddl] [--keep-shadow] [--allow-data-loss] ` +
-          `[--trusted-local-host <hostname>]... [--allow-remote-shadow] [--allow-same-database-identity]\n` +
+          `[--trusted-local-host <hostname>]... [--allow-remote-shadow] [--allow-same-database-identity] [--max-locks <n>] [--split-to-fit]\n` +
           `  [--dry-run] (print the portable apply script to stdout; apply nothing; see pgdelta --help for execution requirements) [--verbose] (stream per-statement progress to stderr) [--out-plan <plan.json>] (write the plan artifact)\n` +
           `  --shadow omitted: a co-located shadow database is created on the target's cluster (database scope only) and dropped after.`,
       );
@@ -765,6 +774,7 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
   const dryRun = flags["dry-run"];
   const verbose = flags["verbose"];
   const outPlanPath = flags["out-plan"];
+  const lockSplit = parseLockSplitFlags(flags);
   const restrictToApplier = restrictToApplierFromFlags(flags);
 
   // The export directory's manifest (redaction mode, profile, scope), consulted
@@ -1093,7 +1103,13 @@ export async function cmdSchemaApply(args: string[]): Promise<void> {
       },
     );
 
-    const thePlan = planned.plan;
+    let thePlan = planned.plan;
+    if (lockSplit.splitToFit) {
+      const budget = await estimateLockTableBudget(tgt.pool);
+      thePlan = splitPlan(thePlan, { maxLocks: budget.available });
+    } else if (lockSplit.maxLocks !== undefined) {
+      thePlan = splitPlan(thePlan, { maxLocks: lockSplit.maxLocks });
+    }
     process.stderr.write(`Planning: ${thePlan.actions.length} action(s)\n`);
 
     if (renames === "prompt" && thePlan.renameCandidates.length > 0) {

@@ -172,13 +172,12 @@ declarative-schemas/
 # TypeDoc generated output
 docs/api-reference/
 
-# ===================
-# tldr ignore patterns
-# ===================
-.tldr/
+# Benchmark artifacts (JSONL runs from packages/pg-delta/scripts/benchmark-remote.ts)
+.bench-artifacts/
 
 # Verdaccio local registry state (created by `bun run verdaccio:start`)
 .verdaccio/storage/
 .verdaccio/htpasswd
 .verdaccio/plugins/
 verdaccio/.verdaccio/
+

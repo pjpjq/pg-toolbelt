@@ -1,0 +1,32 @@
+import { describe, expect, test } from "bun:test";
+import type { Action } from "../plan/plan.ts";
+import { assertDataLossAllowed } from "./data-loss-safety.ts";
+import { UsageError } from "./flags.ts";
+
+const action = (dataLoss: Action["dataLoss"]): Action => ({
+  sql: dataLoss === "destructive" ? "DROP TABLE app.t" : "ALTER TABLE app.t",
+  verb: dataLoss === "destructive" ? "drop" : "alter",
+  produces: [],
+  consumes: [],
+  destroys: [],
+  releases: [],
+  transactionality: "transactional",
+  lockClass: "accessExclusive",
+  newSegmentBefore: false,
+  dataLoss,
+  rewriteRisk: false,
+});
+
+describe("assertDataLossAllowed", () => {
+  test("requires a separate explicit approval", () => {
+    expect(() =>
+      assertDataLossAllowed([action("destructive")], false, "apply"),
+    ).toThrow(UsageError);
+    expect(() =>
+      assertDataLossAllowed([action("destructive")], true, "apply"),
+    ).not.toThrow();
+    expect(() =>
+      assertDataLossAllowed([action("none")], false, "apply"),
+    ).not.toThrow();
+  });
+});
